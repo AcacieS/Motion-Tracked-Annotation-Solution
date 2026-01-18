@@ -775,19 +775,6 @@ def run_track(video_path_str, start_frame_idx, editor_value, frames_to_propagate
     return
 
 
-
-
-
-
-# def run_track_safe(video_path_str, start_frame_idx, editor_value, frames_to_propagate, max_internal_size,
-#                    lk_every, lk_corners, lk_inlier):
-#     try:
-#         return run_track(video_path_str, start_frame_idx, editor_value, frames_to_propagate, max_internal_size,
-#                          lk_every, lk_corners, lk_inlier)
-
-#     except Exception as e:
-#         traceback.print_exc()
-#         raise gr.Error(str(e))
 def run_track_safe(video_path_str, start_frame_idx, editor_value,
                    frames_to_propagate, max_internal_size,
                    lk_every, lk_corners, lk_inlier):
