@@ -17,13 +17,13 @@ from gui.interactive_utils import image_to_torch, torch_prob_to_numpy_mask, inde
 DEFAULT_VIDEO = "Lapchole4.mp4"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-def _resolve_video_path(p):
-    #cand = [p, os.path.join("/content", p)]
-    cand = [p, os.path.join(os.getcwd(), p)]
-    for c in cand:
-        if os.path.exists(c):
-            return c
-    raise gr.Error(f"Video not found: {p}")
+# def _resolve_video_path(p):
+#     #cand = [p, os.path.join("/content", p)]
+#     cand = [p, os.path.join(os.getcwd(), p)]
+#     for c in cand:
+#         if os.path.exists(c):
+#             return c
+#     raise gr.Error(f"Video not found: {p}")
 
 def _get_video_info(video_path):
     cap = cv2.VideoCapture(video_path)
@@ -36,6 +36,12 @@ def _get_video_info(video_path):
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     cap.release()
     return fps, n, w, h
+
+def resolve_video_path(video_input):
+    # Gradio older versions return dict {name: "..."}
+    if isinstance(video_input, dict):
+        return video_input["name"]
+    return video_input
 
 def _read_frame(video_path, frame_idx):
     cap = cv2.VideoCapture(video_path)
@@ -53,6 +59,28 @@ def _editor_value_from_frame(frame_pil):
     # 关键：让你“在这一帧上画”，不是黑底
     # ImageEditor 需要 composite 字段，否则你之前会 KeyError
     return {"background": frame_pil, "layers": [], "composite": frame_pil}
+
+def _warp_mask_affine(mask01, M, w, h):
+    """
+    Warp binary mask with affine transform.
+    mask01 : HxW uint8 (0/1)
+    M      : 2x3 affine matrix mapping prev->curr
+    w,h    : output size
+    returns: warped mask HxW uint8 (0/1)
+    """
+    import cv2
+    import numpy as np
+    
+    mask_u8 = (mask01 > 0).astype(np.uint8) * 255
+    warped = cv2.warpAffine(
+        mask_u8,
+        M,
+        (w, h),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0
+    )
+    return (warped > 127).astype(np.uint8)
 
 def _mask_from_editor(editor_value):
     """
@@ -88,7 +116,10 @@ def _save_overlay_video(frames_bgr, fps, out_mp4):
 
 
 def load_video(video_path_str):
-    vp = _resolve_video_path(video_path_str)
+    vp = resolve_video_path(video_path_str)
+    # vp = video_path_str
+    if vp is None:
+        raise gr.Error("Please upload a video first.")
     fps, n, w, h = _get_video_info(vp)
     _, frame0_pil = _read_frame(vp, 0)
     editor_init = _editor_value_from_frame(frame0_pil)
@@ -107,7 +138,7 @@ def load_video(video_path_str):
     default_mis = min(max_side, 720)  # 你也可以改成 640/800 等
     max_internal_update = gr.update(minimum=256, maximum=max(256, max_side), value=default_mis, step=32)
 
-    return vp, frame0_pil, editor_init, frame_idx_update, frames_to_prop_update, max_internal_update, info
+    return frame0_pil, editor_init, frame_idx_update, frames_to_prop_update, max_internal_update, info
 
 
 def overlay_fast_bgr(frame_bgr, mask01, color_bgr=(0, 255, 0), alpha=0.45, draw_outline=True):
@@ -254,7 +285,10 @@ def _estimate_affine_lk(prev_bgr, curr_bgr, prev_mask01,
 
 
 def show_frame(video_path_str, frame_idx):
-    vp = _resolve_video_path(video_path_str)
+    vp = resolve_video_path(video_path_str)
+    # vp = video_path_str
+    if vp is None:
+        raise gr.Error("Please upload a video first.")
     fps, n, w, h = _get_video_info(vp)
 
     frame_idx = int(frame_idx)
@@ -326,7 +360,10 @@ def run_track(video_path_str, start_frame_idx, editor_value, frames_to_propagate
     if K < 1:
         K = 1
 
-    vp = _resolve_video_path(video_path_str)
+    vp = resolve_video_path(video_path_str)
+    # vp = video_path_str
+    if vp is None:
+        raise gr.Error("Please upload a video first.")
     fps, n, w, h = _get_video_info(vp)
 
     start_frame_idx = int(start_frame_idx)
@@ -526,6 +563,8 @@ def run_track(video_path_str, start_frame_idx, editor_value, frames_to_propagate
         amp_device = "cuda" if DEVICE == "cuda" else "cpu"
         with torch.amp.autocast(device_type=amp_device, enabled=(DEVICE == "cuda")):
             t0 = time.perf_counter()
+            # frame0_t = image_to_torch(frame0_roi, device=DEVICE)
+            # mask_torch = index_numpy_to_one_hot_torch(mask0_roi, 2).to(DEVICE)
             frame0_t = image_to_torch(frame0_roi, device=DEVICE)
             mask_torch = index_numpy_to_one_hot_torch(mask0_roi, 2).to(DEVICE)
             pred0 = processor.step(frame0_t, mask_torch[1:], idx_mask=False)
@@ -550,6 +589,11 @@ def run_track(video_path_str, start_frame_idx, editor_value, frames_to_propagate
     overlay_frames_bgr.append(
         overlay_fast_bgr(anchor_frame, anchor_mask, alpha=0.45, draw_outline=True)
     )
+    vis_bgr = overlay_frames_bgr[-1]
+    vis_rgb = cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB)
+
+    yield vis_rgb, None, f"Processing frame {processed}..."
+    
     t_overlay += (time.perf_counter() - t0)
     processed += 1
 
@@ -612,6 +656,10 @@ def run_track(video_path_str, start_frame_idx, editor_value, frames_to_propagate
                     overlay_frames_bgr.append(
                         overlay_fast_bgr(next_anchor_frame, next_anchor_mask, alpha=0.45, draw_outline=True)
                     )
+                    vis_bgr = overlay_frames_bgr[-1]
+                    vis_rgb = cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB)
+
+                    yield vis_rgb, None, f"Processing frame {processed}..."
                     t_overlay += (time.perf_counter() - t0)
                     processed += 1
                     anchor_frame = next_anchor_frame
@@ -660,6 +708,10 @@ def run_track(video_path_str, start_frame_idx, editor_value, frames_to_propagate
                     overlay_frames_bgr.append(
                         overlay_fast_bgr(seg_frames[i], pred_index, alpha=0.45, draw_outline=True)
                     )
+                    vis_bgr = overlay_frames_bgr[-1]
+                    vis_rgb = cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB)
+
+                    yield vis_rgb, None, f"Processing frame {processed}..."
                     t_overlay += (time.perf_counter() - t0)
 
                     processed += 1
@@ -674,6 +726,10 @@ def run_track(video_path_str, start_frame_idx, editor_value, frames_to_propagate
                 overlay_frames_bgr.append(
                     overlay_fast_bgr(next_anchor_frame, next_anchor_mask, alpha=0.45, draw_outline=True)
                 )
+                vis_bgr = overlay_frames_bgr[-1]
+                vis_rgb = cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB)
+
+                yield vis_rgb, None, f"Processing frame {processed}..."
                 t_overlay += (time.perf_counter() - t0)
                 processed += 1
 
@@ -715,18 +771,34 @@ def run_track(video_path_str, start_frame_idx, editor_value, frames_to_propagate
         f"Video: {os.path.basename(vp)} size={w}x{h} start={start_frame_idx}"
     )
 
-    return overlay_mp4, status
+    yield None, overlay_mp4, status
+    return
 
 
 
 
 
 
-def run_track_safe(video_path_str, start_frame_idx, editor_value, frames_to_propagate, max_internal_size,
+# def run_track_safe(video_path_str, start_frame_idx, editor_value, frames_to_propagate, max_internal_size,
+#                    lk_every, lk_corners, lk_inlier):
+#     try:
+#         return run_track(video_path_str, start_frame_idx, editor_value, frames_to_propagate, max_internal_size,
+#                          lk_every, lk_corners, lk_inlier)
+
+#     except Exception as e:
+#         traceback.print_exc()
+#         raise gr.Error(str(e))
+def run_track_safe(video_path_str, start_frame_idx, editor_value,
+                   frames_to_propagate, max_internal_size,
                    lk_every, lk_corners, lk_inlier):
     try:
-        return run_track(video_path_str, start_frame_idx, editor_value, frames_to_propagate, max_internal_size,
-                         lk_every, lk_corners, lk_inlier)
+        # Forward every yielded triple to Gradio
+        for live_img, out_video, text in run_track(
+            video_path_str, start_frame_idx, editor_value,
+            frames_to_propagate, max_internal_size,
+            lk_every, lk_corners, lk_inlier
+        ):
+            yield live_img, out_video, text
 
     except Exception as e:
         traceback.print_exc()
@@ -737,13 +809,15 @@ def run_track_safe(video_path_str, start_frame_idx, editor_value, frames_to_prop
 with gr.Blocks() as demo:
     gr.Markdown("## CUTIE (Preview video in Gradio + draw mask on a selected frame)")
 
-    video_path = gr.Textbox(label="Video path (in /content)", value=DEFAULT_VIDEO)
+    #video_path = gr.Textbox(label="Video path (in /content)", value=DEFAULT_VIDEO)
+    video_upload = gr.Video(label="Upload / Preview Video", autoplay=True, loop=True, height=480)
     with gr.Row():
         load_btn = gr.Button("Load video")
         info = gr.Textbox(label="Info", interactive=False)
 
     with gr.Row():
-        orig_video = gr.Video(label="Original Video (preview here)")
+        #orig_video = gr.Video(label="Original Video (preview here)")
+        live_preview = gr.Image(label="Live Preview", type="numpy")
         overlay_video = gr.Video(label="Overlay Video (result preview)")
 
     gr.Markdown("### 1) Use the video player to preview (pause/seek).  2) Choose a frame index below to annotate (Gradio can't read the paused timestamp).")
@@ -778,21 +852,21 @@ with gr.Blocks() as demo:
 
     load_btn.click(
     load_video,
-    inputs=[video_path],
-    outputs=[orig_video, frame_view, mask_editor, frame_idx, frames_to_prop, max_internal_size, info],
+    inputs=[video_upload],
+    outputs=[frame_view, mask_editor, frame_idx, frames_to_prop, max_internal_size, info],
     queue=False
 )
 
     show_btn.click(
     show_frame,
-    inputs=[video_path, frame_idx],
+    inputs=[video_upload, frame_idx],
     outputs=[frame_view, mask_editor, frames_to_prop],
     queue=False
 )
     run_btn.click(
     run_track_safe,
-    inputs=[video_path, frame_idx, mask_editor, frames_to_prop, max_internal_size, lk_every, lk_corners, lk_inlier],
-    outputs=[overlay_video, status],
+    inputs=[video_upload, frame_idx, mask_editor, frames_to_prop, max_internal_size, lk_every, lk_corners, lk_inlier],
+    outputs=[live_preview,overlay_video, status],
     queue=True
 )
 
